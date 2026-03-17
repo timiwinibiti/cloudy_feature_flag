@@ -1,32 +1,60 @@
-/**
- * Import function triggers from their respective submodules:
- *
- * import {onCall} from "firebase-functions/v2/https";
- * import {onDocumentWritten} from "firebase-functions/v2/firestore";
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
- */
+import * as functions from 'firebase-functions';
+import * as admin from 'firebase-admin';
 
-import {setGlobalOptions} from "firebase-functions";
-import {onRequest} from "firebase-functions/https";
-import * as logger from "firebase-functions/logger";
+// Automatically uses the default service account
+admin.initializeApp();
 
-// Start writing functions
-// https://firebase.google.com/docs/functions/typescript
+// 1. Define the exact shape of the payload
+interface WebhookPayload {
+    flag_name: string;
+    flag_value: {
+        enabled: boolean;
+        [key: string]: any; // Allow for additional properties
+    }
+    webhook_secret: string;
+}
 
-// For cost control, you can set the maximum number of containers that can be
-// running at the same time. This helps mitigate the impact of unexpected
-// traffic spikes by instead downgrading performance. This limit is a
-// per-function limit. You can override the limit for each function using the
-// `maxInstances` option in the function's options, e.g.
-// `onRequest({ maxInstances: 5 }, (req, res) => { ... })`.
-// NOTE: setGlobalOptions does not apply to functions using the v1 API. V1
-// functions should each use functions.runWith({ maxInstances: 10 }) instead.
-// In the v1 API, each function can only serve one request per container, so
-// this will be the maximum concurrent request count.
-setGlobalOptions({ maxInstances: 10 });
+export const syncFeatureFlag = functions.https.onRequest(async (req, res) => {
+    // 2. Only allow POST requests
+    if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+    }
 
-// export const helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
+    // 3. Cast the incoming request body to our strict TS interface
+    const { flag_name, flag_value, webhook_secret } = req.body as WebhookPayload;
+
+    // 4. Verify the secret key mathces .env file
+    if (webhook_secret !== process.env.WEBHOOK_SECRET) {
+        res.status(401).send('Unauthorized');
+        return;
+    }
+
+    // Validate backend actually sent the data
+    if (!flag_name || flag_value === undefined) {
+        res.status(400).send('Bad Request: Missing flag_name or flag_value');
+        return;
+    }
+
+    try {
+        const remoteConfig = admin.remoteConfig();
+
+        // 5. Fetch, modify, and publish the template
+        const template = await remoteConfig.getTemplate();
+
+        template.parameters[flag_name] = {
+            defaultValue: {
+                value: JSON.stringify(flag_value)
+            },
+            valueType: 'JSON',
+        }
+
+        await remoteConfig.validateTemplate(template);
+        await remoteConfig.publishTemplate(template);
+
+        res.status(200).send({ success: true, message: `Synced ${flag_name}` });
+    } catch (error) {
+        console.error("Firebase API Error:", error);
+        res.status(500).send({ error: "Failed to update Remote Config" });
+    }
+});
