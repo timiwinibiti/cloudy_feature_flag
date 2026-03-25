@@ -26,9 +26,16 @@ interface WebhookPayload {
   condition?: ConditionPayload;
 }
 
+function parseCompanyIds(expression: string): string[] {
+  const match = expression.match(/\^\(([^)]+)\)\$/);
+  if (!match) return [];
+  return match[1].split("|");
+}
+
 function buildCompanyIdExpression(companyIds: string[]): string {
-  const regex = `^(${companyIds.join("|")})$`;
-  return `device.userProperty['COMPANY_ID'].contains('${regex}')`;
+  const unique = [...new Set(companyIds)];
+  const regex = `^(${unique.join("|")})$`;
+  return `app.userProperty['COMPANY_ID'].matches(['${regex}'])`;
 }
 
 export const syncFeatureFlag = onRequest(async (req, res) => {
@@ -68,10 +75,13 @@ export const syncFeatureFlag = onRequest(async (req, res) => {
 
     // Update condition and its conditional value if provided
     if (condition) {
-      const expression = buildCompanyIdExpression(condition.companyIds);
+      let expression = buildCompanyIdExpression(condition.companyIds);
 
       const existingIndex = template.conditions.findIndex((c) => c.name === condition.name);
       if (existingIndex >= 0) {
+        const existingIds = parseCompanyIds(template.conditions[existingIndex].expression ?? "");
+        const mergedIds = [...existingIds, ...condition.companyIds];
+        expression = buildCompanyIdExpression(mergedIds);
         template.conditions[existingIndex].expression = expression;
       } else {
         template.conditions.push({ name: condition.name, expression });
