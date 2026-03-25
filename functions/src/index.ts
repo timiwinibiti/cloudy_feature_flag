@@ -1,60 +1,91 @@
-import * as functions from 'firebase-functions';
-import * as admin from 'firebase-admin';
+import * as admin from "firebase-admin";
+import { setGlobalOptions } from "firebase-functions/v2";
+import { onRequest } from "firebase-functions/v2/https";
 
-// Automatically uses the default service account
 admin.initializeApp();
+setGlobalOptions({ region: "asia-southeast2" });
 
-// 1. Define the exact shape of the payload
-interface WebhookPayload {
-    flag_name: string;
-    flag_value: {
-        enabled: boolean;
-        [key: string]: any; // Allow for additional properties
-    }
-    webhook_secret: string;
+interface FlagValue {
+  enabled: boolean;
+  [key: string]: unknown;
 }
 
-export const syncFeatureFlag = functions.https.onRequest(async (req, res) => {
-    // 2. Only allow POST requests
-    if (req.method !== 'POST') {
-        res.status(405).send('Method Not Allowed');
-        return;
+interface ConditionPayload {
+  name: string;
+  companyIds: string[];
+  value: FlagValue;
+}
+
+interface WebhookPayload {
+  flagName: string;
+  flagValue: FlagValue;
+  webhookSecret: string;
+  condition?: ConditionPayload;
+}
+
+function buildCompanyIdExpression(companyIds: string[]): string {
+  const regex = `^(${companyIds.join("|")})$`;
+  return `device.userProperty['COMPANY_ID'].contains('${regex}')`;
+}
+
+export const syncFeatureFlag = onRequest(async (req, res) => {
+  // Only allow POST requests
+  if (req.method !== "POST") {
+    res.status(405).send("Method Not Allowed");
+    return;
+  }
+
+  const { flagName, flagValue, webhookSecret, condition } = req.body as WebhookPayload;
+
+  if (webhookSecret !== process.env.WEBHOOK_SECRET) {
+    res.status(401).send("Unauthorized");
+    return;
+  }
+
+  if (!flagName || flagValue === undefined) {
+    res.status(400).send("Bad Request: Missing flagName or flagValue");
+    return;
+  }
+
+  try {
+    const remoteConfig = admin.remoteConfig();
+    const template = await remoteConfig.getTemplate();
+
+    if (!template.parameters[flagName]) {
+      res.status(404).send({ error: `Flag "${flagName}" not found in Remote Config` });
+      return;
     }
 
-    // 3. Cast the incoming request body to our strict TS interface
-    const { flag_name, flag_value, webhook_secret } = req.body as WebhookPayload;
+    // Update default value, preserving existing conditional values
+    template.parameters[flagName] = {
+      ...template.parameters[flagName],
+      defaultValue: { value: JSON.stringify(flagValue) },
+      valueType: "JSON",
+    };
 
-    // 4. Verify the secret key mathces .env file
-    if (webhook_secret !== process.env.WEBHOOK_SECRET) {
-        res.status(401).send('Unauthorized');
-        return;
+    // Update condition and its conditional value if provided
+    if (condition) {
+      const expression = buildCompanyIdExpression(condition.companyIds);
+
+      const existingIndex = template.conditions.findIndex((c) => c.name === condition.name);
+      if (existingIndex >= 0) {
+        template.conditions[existingIndex].expression = expression;
+      } else {
+        template.conditions.push({ name: condition.name, expression });
+      }
+
+      template.parameters[flagName].conditionalValues = {
+        ...template.parameters[flagName].conditionalValues,
+        [condition.name]: { value: JSON.stringify(condition.value) },
+      };
     }
 
-    // Validate backend actually sent the data
-    if (!flag_name || flag_value === undefined) {
-        res.status(400).send('Bad Request: Missing flag_name or flag_value');
-        return;
-    }
+    await remoteConfig.validateTemplate(template);
+    await remoteConfig.publishTemplate(template);
 
-    try {
-        const remoteConfig = admin.remoteConfig();
-
-        // 5. Fetch, modify, and publish the template
-        const template = await remoteConfig.getTemplate();
-
-        template.parameters[flag_name] = {
-            defaultValue: {
-                value: JSON.stringify(flag_value)
-            },
-            valueType: 'JSON',
-        }
-
-        await remoteConfig.validateTemplate(template);
-        await remoteConfig.publishTemplate(template);
-
-        res.status(200).send({ success: true, message: `Synced ${flag_name}` });
-    } catch (error) {
-        console.error("Firebase API Error:", error);
-        res.status(500).send({ error: "Failed to update Remote Config" });
-    }
+    res.status(200).send({ success: true, message: `Synced ${flagName}` });
+  } catch (error) {
+    console.error("Firebase API Error:", error);
+    res.status(500).send({ error: "Failed to update Remote Config" });
+  }
 });
