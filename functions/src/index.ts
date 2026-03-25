@@ -3,7 +3,10 @@ import { setGlobalOptions } from "firebase-functions/v2";
 import { onRequest } from "firebase-functions/v2/https";
 
 admin.initializeApp();
-setGlobalOptions({ region: "asia-southeast2" });
+setGlobalOptions({
+  region: "asia-southeast2",
+  serviceAccount: "REDACTED_SERVICE_ACCOUNT",
+});
 
 interface FlagValue {
   enabled: boolean;
@@ -84,8 +87,19 @@ export const syncFeatureFlag = onRequest(async (req, res) => {
     await remoteConfig.publishTemplate(template);
 
     res.status(200).send({ success: true, message: `Synced ${flagName}` });
-  } catch (error) {
-    console.error("Firebase API Error:", error);
-    res.status(500).send({ error: "Failed to update Remote Config" });
+  } catch (error: unknown) {
+    const err = error as { code?: string; message?: string; errorInfo?: object };
+    console.error("Firebase API Error:", JSON.stringify({
+      code: err.code,
+      message: err.message,
+      errorInfo: err.errorInfo,
+      flagName,
+      condition: condition?.name,
+    }));
+    res.status(500).send({
+      error: "Failed to update Remote Config",
+      code: err.code,
+      message: err.message,
+    });
   }
 });
