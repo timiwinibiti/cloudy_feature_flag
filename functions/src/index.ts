@@ -4,8 +4,8 @@ import { onRequest } from "firebase-functions/v2/https";
 
 admin.initializeApp();
 setGlobalOptions({
-  region: "asia-southeast2",
-  serviceAccount: "REDACTED_SERVICE_ACCOUNT",
+  region: process.env.REGION,
+  serviceAccount: process.env.SERVICE_ACCOUNT,
 });
 
 interface FlagValue {
